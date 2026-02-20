@@ -1,3 +1,13 @@
+-- NOTICE:
+-- YOU MUST GO ON ONE OF THE PADS IN THE LOBBY AREA
+-- TO GET TO THE GAME PART WHERE THIS SCRIPT IS USED
+-- (THE TTD GAME PART)
+
+
+
+
+
+
 -- Variables
 -- Servces
 local players = game:GetService("Players")
