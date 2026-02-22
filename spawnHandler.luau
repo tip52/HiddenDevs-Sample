@@ -4,17 +4,13 @@
 -- (THE TTD GAME PART)
 
 
-
-
-
-
 -- Variables
 -- Servces
 local players = game:GetService("Players")
-local rep = game:WaitForChild("ReplicatedStorage")
+local rep = game:GetService("ReplicatedStorage")
 
 -- Modules
-local repstore = game:WaitForChild("ServerStorage")
+local repstore = game:GetService("ServerStorage")
 local module = require(repstore:WaitForChild("TDModule"))
 local waveData = require(repstore:WaitForChild("waveData"))
 local data2 = require(rep:WaitForChild("enemyData"))
@@ -43,8 +39,17 @@ _G.startTick = tick()
 -- wait for variables script to run
 -- -> sets these variables: _G.map, _G.chapter, _G.movepointsFolder, _G.maxHealth, _G.health
 repeat
-	wait()
+	task.wait()
 until _G.variablesLoaded
+
+-- wave and spawned are global because other scripts need to read them
+_G.wave = 0
+_G.spawned = {}
+
+-- these are internal to this script only
+local died = false
+local canSkip = true
+local hasEnded = false
 
 -- datastore functions
 function getPlayerTotalDamage(player)
@@ -71,14 +76,14 @@ local function updateDataStore(dataStore, userId, amount)
 		return dataStore:GetAsync(userId)
 	end)
 
-	if success then
-		currentValue = currentValue or 0
+	if not success then return end
 
-		-- actually update it to the params
-		pcall(function()
-			dataStore:SetAsync(userId, currentValue + amount)
-		end)
-	end
+	currentValue = currentValue or 0
+
+	-- actually update it to the params
+	pcall(function()
+		dataStore:SetAsync(userId, currentValue + amount)
+	end)
 end
 
 local function getDataStoreValue(dataStore, userId)
@@ -132,16 +137,6 @@ for _, movepoint in ipairs(movepointChildren) do
 	end
 end
 
---print(checkpoints)
-
--- set wave based variables
-_G.wave = 0
-_G.died = false
-_G.spawned = {}
-_G.canSkip = true
-local lastWave = _G.wave
-local enemyHealth = {}
-local hasEnded = false
 -- get the order of enemies spawned from waveData
 _G.spawnData = waveData[_G.map][_G.chapter]
 
@@ -149,16 +144,105 @@ print("Starting")
 
 -- clone it so we arent changing the data in the module
 local clonedData = table.clone(_G.spawnData)
+
+-- helpers
+
+local function updateHealthDisplay()
+	finishBoard.Text = tostring(_G.health) .. "/" .. tostring(_G.maxHealth)
+end
+
+-- clean up any dead/removed entries from the spawned table
+local function cleanSpawned()
+	for i, v in next, _G.spawned do
+		if not v or not v.Parent then
+			_G.spawned[i] = nil
+		end
+	end
+end
+
+-- give all players the wave bonus and update their ui
+local function giveWaveBonus()
+	for _, player in next, game.Players:GetPlayers() do
+		_G.money[player] += _G.spawnData[_G.wave]["bonus"]
+		getCash:FireClient(player, _G.money[player])
+	end
+end
+
+-- bump the wave and tell clients
+local function advanceWave()
+	giveWaveBonus()
+	_G.wave += 1
+	skipEvent:FireAllClients(_G.wave)
+end
+
+-- called when an enemy finishes pathfinding (meaning it made it to the end)
+local function handleEnemyEnd(part)
+	local partHealth = part.Health.Value
+
+	-- if below 0, set to 0 (because we subtract health and we dont want negatives)
+	if partHealth < 0 then
+		partHealth = 0
+	end
+
+	-- subtract health of the enemy from your health
+	_G.health -= partHealth
+
+	-- if your health is below 0, enough enemies have reached the end and you died
+	if _G.health <= 0 then
+		warn("you died")
+		-- update vars
+		_G.health = 0
+		died = true
+		endEvent:FireAllClients()
+	end
+
+	-- update text since you took damage
+	updateHealthDisplay()
+	-- delete enemy once reached end
+	part:Destroy()
+
+	cleanSpawned()
+
+	-- if the wave was comlpeted and your not dead, give cash and move to the next wave
+	if #_G.spawned == 0 and not died then
+		warn("Skipping from die")
+		advanceWave()
+	end
+end
+
+-- spawns a single enemy and handles it reaching the end
+-- needs its own thread because makeCharacter blocks while moving
+local function spawnEnemy(name, tableWave)
+	if type(name) ~= "string" then return end
+	-- sanity check - wave shouldnt have dropped below when this was queued
+	if _G.wave < tableWave then return end
+
+	-- We make the enemy using the module, the module creates it, and MOVES IT
+	-- which means that by the time the function is done being called, the moveto is completed
+	-- thus the enemy must have made it to the end if it still exists and hasnt been killed / destroyed yet
+	local part = module:makeCharacter(
+		spawnppos,
+		checkpoints,
+		data2[name].Speed,
+		entities:FindFirstChild(name)
+	)
+
+	-- If the enemy still exists after the pathfinding is done, it means it made it to the end and we need deal damage
+	if part then
+		handleEnemyEnd(part)
+	end
+end
+
 replayEvent.OnServerEvent:Connect(function()
 	-- Map is being replayed, reset all variables and clean up the workspace for a new round
 	_G.wave = 1
 	hasEnded = false
 
 	-- delete old enemies and troops from workspace
-	for i, v in next, workspace.GameData.Enemys:GetChildren() do
+	for _, v in next, workspace.GameData.Enemys:GetChildren() do
 		v:Destroy()
 	end
-	for i, v in next, workspace.GameData.Troops:GetChildren() do
+	for _, v in next, workspace.GameData.Troops:GetChildren() do
 		v:Destroy()
 	end
 
@@ -173,12 +257,12 @@ replayEvent.OnServerEvent:Connect(function()
 	_G.startTick = tick()
 	_G.health = _G.maxHealth
 	clonedData = table.clone(_G.spawnData)
-	_G.died = false
+	died = false
 
-	-- rest health bar thingy
-	finishBoard.Text = tostring(_G.health) .. "/" .. tostring(_G.maxHealth)
+	-- reset health bar thingy
+	updateHealthDisplay()
 
-	for i, v in next, game.Players:GetPlayers() do
+	for _, v in next, game.Players:GetPlayers() do
 		v.PlayerGui.endUi.Enabled = false
 	end
 
@@ -220,9 +304,7 @@ skipEvent.OnServerEvent:Connect(function(player)
 	-- skip wave event
 
 	-- if u cant skip then return
-	if not _G.canSkip then
-		return
-	end
+	if not canSkip then return end
 
 	for _, player in next, game.Players:GetPlayers() do
 		-- if they somehow dont have money, set to base
@@ -231,9 +313,7 @@ skipEvent.OnServerEvent:Connect(function(player)
 		end
 
 		-- if the wave is somehow higher than the spawn data, return (shouldnt happen but just in case)
-		if not _G.spawnData[_G.wave] then
-			return
-		end
+		if not _G.spawnData[_G.wave] then return end
 
 		-- give the players the bonus for skipping the wave based on the spawn data
 		_G.money[player] += _G.spawnData[_G.wave]["bonus"]
@@ -247,9 +327,9 @@ skipEvent.OnServerEvent:Connect(function(player)
 	skipEvent:FireAllClients(_G.wave)
 
 	-- cant skip for 10s
-	_G.canSkip = false
+	canSkip = false
 	task.delay(10, function()
-		_G.canSkip = true
+		canSkip = true
 		canSkipEvent:FireAllClients()
 	end)
 end)
@@ -262,11 +342,12 @@ players.PlayerAdded:Connect(function(player)
 end)
 
 -- make sure the enemies cant collide with each other or the map, was having issues for some reason
-spawn(function()
-	while wait(0.5) do
+-- BasePart covers MeshPart and Part so no need to check all three separately
+task.spawn(function()
+	while task.wait(0.5) do
 		for _, enemy in pairs(workspace.GameData.Enemys:GetChildren()) do
 			for _, child in pairs(enemy:GetChildren()) do
-				if (child:IsA("BasePart") or child:IsA("MeshPart") or child:IsA("Part")) and child.CanCollide then
+				if child:IsA("BasePart") and child.CanCollide then
 					child.CanCollide = false
 				end
 			end
@@ -275,90 +356,22 @@ spawn(function()
 end)
 
 -- main wave loop
-spawn(function()
+task.spawn(function()
 	while task.wait(0.5) do
 		print("wave is: ", _G.wave)
-		local baseSpawnedEnemys = _G.spawnData[_G.wave]
-		local currentSpawnedEnemys = _G.spawned
 
 		for tableWave, data in clonedData do
 			-- make sure data is valid and the wave is correct
-			if type(tableWave) == "number" and _G.wave >= tableWave then
-				-- overwrite so we dont do the same wave twice (cause we are using >= and it could be risky)
-				clonedData[tableWave] = nil
+			if type(tableWave) ~= "number" then continue end
+			if _G.wave < tableWave then continue end
 
-				for _, name in data do
-					local part
+			-- overwrite so we dont do the same wave twice (cause we are using >= and it could be risky)
+			clonedData[tableWave] = nil
 
-					-- need a new thread because of how makeCharacter works
-					spawn(function()
-						if type(name) == "string" then
-							-- another sanity check
-							if _G.wave >= tableWave then
-								-- We make the enemy using the module, the module creates it, and MOVES IT
-								-- which means that by the time the function is done being called, the moveto is completed
-								-- thus the enemy must have made it to the end if it still exists and hasnt been killed / destroyed yet
-								part = module:makeCharacter(
-									spawnppos,
-									checkpoints,
-									data2[name].Speed,
-									entities:FindFirstChild(name)
-								)
-
-								-- If the enemy still exists after the pathfinding is done, it means it made it to the end and we need deal damage
-								if part then
-									local partHealth = part.Health.Value
-
-									-- if below 0, set to 0 (because we subtract health and we dont want negatives)
-									if partHealth < 0 then
-										partHealth = 0
-									end
-
-									-- subtract health of the enemy from your health
-									_G.health -= partHealth
-
-									-- if your health is below 0, enough enemies have reached the end and you died
-									if _G.health <= 0 then
-										warn("you died")
-										--update vars
-										_G.health = 0
-										_G.died = true
-										endEvent:FireAllClients()
-									end
-
-									-- update text since you took damage
-									finishBoard.Text = tostring(_G.health) .. "/" .. tostring(_G.maxHealth)
-									-- delete enemy once reached end
-									part:Destroy()
-
-									-- clean up anything in the spawned table
-									for i, v in next, _G.spawned do
-										if not v or not v.Parent then
-											_G.spawned[i] = nil
-										end
-									end
-
-									-- if the wave was comlpeted and your not dead, give cash and move to the next wave
-									if #_G.spawned == 0 and not _G.died then
-										warn("Skipping from die")
-
-										for _, player in next, game.Players:GetPlayers() do
-											_G.money[player] += _G.spawnData[_G.wave]["bonus"]
-
-											getCash:FireClient(player, _G.money[player])
-										end
-
-										_G.wave += 1
-
-										skipEvent:FireAllClients(_G.wave)
-									end
-								end
-							end
-						end
-					end)
-
-					wait(0.5)
-				end
+			for _, name in data do
+				-- need a new thread because of how makeCharacter works
+				task.spawn(spawnEnemy, name, tableWave)
+				task.wait(0.5)
 			end
 		end
 	end
